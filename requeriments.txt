@@ -1,5 +1,0 @@
-numpy
-scipy
-# 'requests' não é mais necessário se não usarmos API
-# 'transformers' e 'torch' são substituídos por 'llama-cpp-python'
-llama-cpp-python
