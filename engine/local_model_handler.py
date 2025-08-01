@@ -1,6 +1,8 @@
 # engine/local_model_handler.py - Versão Corrigida v2.1
 # Handler corrigido com extração real de logits e estados internos
-
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import numpy as np
 from pathlib import Path
 import config
@@ -112,18 +114,9 @@ class LocalModelHandler:
         print(f"\n📁 Coloque o arquivo .gguf baixado em: {config.ENV['models_dir']}")
 
     def generate_response(self, prompt: str, temperature: float = 0.7, top_p: float = 0.9, 
-                         top_k: int = 30, repetition_penalty: float = 1.1) -> dict:
+                     top_k: int = 30, repetition_penalty: float = 1.1) -> dict:
         """
-        Gera resposta com extração completa de estados internos
-        
-        Returns:
-            dict: {
-                'text': str,
-                'logits': np.ndarray,
-                'tokens': list,
-                'generation_stats': dict,
-                'internal_states': dict
-            }
+        Gera resposta com timeout robusto e debug extensivo
         """
         
         if not self.llm:
@@ -137,51 +130,149 @@ class LocalModelHandler:
 
         self.generation_stats["total_generations"] += 1
         
+        # === DEBUG: Verifica parâmetros de entrada ===
+        print(f"\n🔍 [DEBUG] INICIANDO GERAÇÃO:")
+        print(f"   📝 Prompt length: {len(prompt)} chars")
+        print(f"   🌡️  Temperature: {temperature:.3f}")
+        print(f"   🎯 Top-p: {top_p:.3f}")
+        print(f"   🔢 Top-k: {top_k}")
+        print(f"   🔄 Repetition penalty: {repetition_penalty:.3f}")
+        
+        # === ALERTA: Temperature muito baixa ===
+        if temperature < 0.5:
+            print(f"⚠️  [ALERTA] Temperature {temperature:.3f} muito baixa! Pode causar travamento.")
+            temperature = max(temperature, 0.6)  # Força mínimo mais alto
+            print(f"🔧 [CORREÇÃO] Temperature ajustada para: {temperature:.3f}")
+        
         # Constrói o prompt completo
         full_prompt = f"{MODELO_ONTOLOGICO_PROMPT.strip()}\n\nUsuário: {prompt.strip()}\nAssistente:"
         
-        if config.ENABLE_DEBUG_LOGGING:
-            print(f"\n[DEBUG] Gerando resposta...")
-            print(f"[DEBUG] Parâmetros: T={temperature:.3f}, top_p={top_p}, top_k={top_k}")
+        print(f"📏 [DEBUG] Prompt completo: {len(full_prompt)} chars")
+        
+        # === FUNÇÃO DE GERAÇÃO COM TIMEOUT ===
+        def _generate_with_llm():
+            """Função interna para executar geração"""
+            print("🚀 [DEBUG] Iniciando chamada para llama-cpp...")
+            start_time = time.time()
+            
+            try:
+                output = self.llm(
+                    full_prompt,
+                    max_tokens=self.max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    repeat_penalty=repetition_penalty,
+                    stop=["Usuário:", "\nUsuário:", "User:", "\nUser:"],
+                    echo=False
+                )
+                
+                elapsed = time.time() - start_time
+                print(f"✅ [DEBUG] Geração concluída em {elapsed:.2f}s")
+                return output
+                
+            except Exception as e:
+                elapsed = time.time() - start_time
+                print(f"❌ [DEBUG] Erro na geração após {elapsed:.2f}s: {e}")
+                raise
+        
+        # === EXECUÇÃO COM TIMEOUT ROBUSTO ===
+        timeout_seconds = getattr(config, 'GENERATION_TIMEOUT', 30)
+        print(f"⏱️  [DEBUG] Timeout configurado: {timeout_seconds}s")
         
         try:
-            # Geração com parâmetros otimizados
-            output = self.llm(
-                full_prompt,
-                max_tokens=self.max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                repeat_penalty=repetition_penalty,
-                stop=["Usuário:", "\nUsuário:", "User:", "\nUser:"],
-                echo=False  # Não retorna o prompt na resposta
-            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                print("🔄 [DEBUG] Submetendo tarefa para thread pool...")
+                
+                future = executor.submit(_generate_with_llm)
+                
+                # Loop de monitoramento com feedback
+                for i in range(timeout_seconds):
+                    time.sleep(1)
+                    if future.done():
+                        break
+                    if i % 5 == 0:  # Debug a cada 5 segundos
+                        print(f"⏳ [DEBUG] Aguardando geração... {i+1}/{timeout_seconds}s")
+                
+                if not future.done():
+                    print(f"⏰ [TIMEOUT] Geração excedeu {timeout_seconds}s - FORÇANDO PARADA")
+                    future.cancel()
+                    
+                    return {
+                        'text': f"⏰ TIMEOUT: Geração travou após {timeout_seconds}s. Temperature {temperature:.3f} muito baixa?",
+                        'logits': np.array([]),
+                        'tokens': [],
+                        'generation_stats': {'timeout': True, 'temperature_used': temperature},
+                        'internal_states': {'timeout': True, 'reason': 'generation_timeout'}
+                    }
+                
+                # Pega resultado
+                output = future.result(timeout=1)  # Timeout curto pois já terminou
+                
+        except FutureTimeoutError:
+            print("⏰ [TIMEOUT] Future timeout - geração travada")
+            return {
+                'text': f"⏰ TIMEOUT: Sistema travou. Temperature {temperature:.3f} causou loop infinito?",
+                'logits': np.array([]),
+                'tokens': [],
+                'generation_stats': {'timeout': True, 'temperature_used': temperature},
+                'internal_states': {'timeout': True, 'reason': 'future_timeout'}
+            }
             
-            # Extrai o texto da resposta
+        except Exception as e:
+            print(f"❌ [ERROR] Erro na geração: {e}")
+            return {
+                'text': f"❌ Erro na geração: {str(e)[:100]}...",
+                'logits': np.array([]),
+                'tokens': [],
+                'generation_stats': {'error': str(e), 'temperature_used': temperature},
+                'internal_states': {}
+            }
+        
+        # === PROCESSAMENTO DA RESPOSTA ===
+        print("📝 [DEBUG] Processando resposta...")
+        
+        try:
             response_text = output['choices'][0]['text'].strip()
+            print(f"✅ [DEBUG] Texto extraído: {len(response_text)} chars")
             
-            # Extrai logits se disponível
+            if len(response_text) == 0:
+                print("⚠️  [DEBUG] Resposta vazia!")
+                return {
+                    'text': "⚠️ Resposta vazia gerada. Ajuste os parâmetros.",
+                    'logits': np.array([]),
+                    'tokens': [],
+                    'generation_stats': {'empty_response': True, 'temperature_used': temperature},
+                    'internal_states': {}
+                }
+            
+            # Extrai logits e tokens
             logits = self._extract_logits()
             tokens = self._extract_tokens()
             
-            # Estatísticas de geração
+            # Estatísticas
             gen_stats = {
                 "tokens_generated": len(tokens) if tokens else 0,
                 "prompt_tokens": output.get('usage', {}).get('prompt_tokens', 0),
                 "completion_tokens": output.get('usage', {}).get('completion_tokens', 0),
+                "temperature_used": temperature,
+                "successful": True
             }
             
-            # Estados internos adicionais
+            # Estados internos
             internal_states = {
                 "last_token_logits": logits[-1] if len(logits) > 0 else np.array([]),
                 "token_sequence": tokens,
-                "perplexity": self._calculate_perplexity(logits) if len(logits) > 0 else 0.0
+                "perplexity": self._calculate_perplexity(logits) if len(logits) > 0 else 0.0,
+                "generation_successful": True
             }
             
             self.generation_stats["successful_generations"] += 1
             
-            if config.ENABLE_DEBUG_LOGGING:
-                print(f"[DEBUG] ✅ Resposta gerada: {len(response_text)} chars, {gen_stats['tokens_generated']} tokens")
+            print(f"✅ [DEBUG] Geração bem-sucedida!")
+            print(f"   📏 Caracteres: {len(response_text)}")
+            print(f"   🎲 Tokens: {gen_stats['tokens_generated']}")
+            print(f"   🌡️  Temperature final: {temperature:.3f}")
             
             return {
                 'text': response_text,
@@ -192,12 +283,12 @@ class LocalModelHandler:
             }
             
         except Exception as e:
-            print(f"❌ Erro na geração: {e}")
+            print(f"❌ [DEBUG] Erro no processamento da resposta: {e}")
             return {
-                'text': f"Erro na geração: {str(e)[:100]}...",
+                'text': f"❌ Erro no processamento: {str(e)[:100]}...",
                 'logits': np.array([]),
                 'tokens': [],
-                'generation_stats': {'error': str(e)},
+                'generation_stats': {'processing_error': str(e), 'temperature_used': temperature},
                 'internal_states': {}
             }
 

@@ -89,34 +89,62 @@ class OntologicalSystem:
         print("   Digite 'reset' para limpar histórico")
         print("="*70)
 
+    # CORREÇÃO da função apply_regulation no main.py
+
     def apply_regulation(self, regulation_output: dict) -> dict:
         """
-        Aplica regulação ontológica aos parâmetros de geração - VERSÃO CORRIGIDA
+        Aplica regulação ontológica aos parâmetros de geração - VERSÃO CORRIGIDA COM DEBUG
         """
         
         regulation = regulation_output.get('regulation', {})
         omega = regulation.get('omega', config.OMEGA_BASAL)
         c1 = regulation.get('c1', config.C_MAX * 0.5)
         
+        print(f"\n🎛️  [DEBUG] APLICANDO REGULAÇÃO:")
+        print(f"   🌀 Ω (dissolução): {omega:.4f}")
+        print(f"   ⚡ C₁ (intensidade): {c1:.4f}")
+        
         # Fórmula de regulação calibrada
         base_temp = config.LLM_TEMPERATURE
         temp_adjustment = (omega * 1.5) - (c1 * 0.4)
-        new_temperature = base_temp + temp_adjustment
+        raw_temperature = base_temp + temp_adjustment
         
-        # *** CORREÇÃO CRÍTICA: Limites seguros mais altos ***
-        new_temperature = max(0.3, min(new_temperature, 1.2))  # MÍNIMO 0.3 (era 0.1)
+        print(f"   🧮 Cálculo: {base_temp:.2f} + ({omega:.3f} * 1.5) - ({c1:.3f} * 0.4) = {raw_temperature:.3f}")
         
-        # Ajustes para outros parâmetros
+        # *** CORREÇÃO CRÍTICA: Limites muito mais seguros ***
+        if config.SAFE_MODE:
+            # Modo seguro: usa limites do config
+            min_temp = config.MIN_TEMPERATURE  # 0.5
+            max_temp = config.MAX_TEMPERATURE  # 1.0
+            new_temperature = max(min_temp, min(raw_temperature, max_temp))
+            print(f"   🛡️  MODO SEGURO: Limitando entre {min_temp} e {max_temp}")
+        else:
+            # Modo normal: limites mais conservadores
+            new_temperature = max(0.6, min(raw_temperature, 1.2))  # MÍNIMO 0.6
+            print(f"   ⚙️  MODO NORMAL: Limitando entre 0.6 e 1.2")
+        
+        print(f"   ➡️  Temperature final: {base_temp:.2f} → {new_temperature:.2f}")
+        
+        # Alerta para temperature perigosa
+        if new_temperature < 0.5:
+            print(f"   ⚠️  ALERTA: Temperature {new_temperature:.3f} muito baixa!")
+            new_temperature = max(new_temperature, 0.6)  # Força mínimo
+            print(f"   🔧 CORREÇÃO FORÇADA: Temperature ajustada para {new_temperature:.2f}")
+        
+        # Ajustes para outros parâmetros (mais conservadores)
         if omega > 0.3:
             new_top_p = min(config.LLM_TOP_P + 0.1, 0.95)
             new_top_k = min(config.LLM_TOP_K + 10, 50)
+            print(f"   📈 Alta dissolução: Aumentando diversidade")
         else:
-            new_top_p = max(config.LLM_TOP_P - 0.1, 0.8)  # MÍNIMO 0.8 (era 0.7)
-            new_top_k = max(config.LLM_TOP_K - 5, 25)    # MÍNIMO 25 (era 20)
+            new_top_p = max(config.LLM_TOP_P - 0.05, 0.85)  # Mais conservador
+            new_top_k = max(config.LLM_TOP_K - 5, 30)       # Mais conservador
+            print(f"   📉 Baixa dissolução: Reduzindo diversidade")
         
-        # Alta intensidade (c1) -> menos repetição
+        # Repetition penalty mais conservador
         if c1 > 0.7:
-            new_repetition_penalty = min(config.LLM_REPETITION_PENALTY + 0.1, 1.25)  # MÁXIMO 1.25 (era 1.3)
+            new_repetition_penalty = min(config.LLM_REPETITION_PENALTY + 0.05, 1.2)  # Mais suave
+            print(f"   🔄 Alta intensidade: Penalidade de repetição aumentada")
         else:
             new_repetition_penalty = config.LLM_REPETITION_PENALTY
         
@@ -127,67 +155,157 @@ class OntologicalSystem:
             "repetition_penalty": new_repetition_penalty
         }
         
-        if config.LOG_REGULATION_ACTIONS:
-            print(f"\n🎛️  AÇÃO REGULATÓRIA DO KERNEL:")
-            print(f"   🌀 Dissolução (Ω): {omega:.3f}")
-            print(f"   ⚡ Intensidade (C₁): {c1:.3f}")
-            print(f"   🌡️  Temperatura: {base_temp:.2f} → {new_temperature:.2f}")
-            print(f"   🎯 Top-p: {config.LLM_TOP_P:.2f} → {new_top_p:.2f}")
-            print(f"   🔢 Top-k: {config.LLM_TOP_K} → {int(new_top_k)}")
-            print(f"   🔄 Rep. Penalty: {config.LLM_REPETITION_PENALTY:.2f} → {new_repetition_penalty:.2f}")
+        print(f"   📋 PARÂMETROS FINAIS:")
+        print(f"      🌡️  Temperature: {new_temperature:.3f}")
+        print(f"      🎯 Top-p: {new_top_p:.3f}")
+        print(f"      🔢 Top-k: {int(new_top_k)}")
+        print(f"      🔄 Rep. Penalty: {new_repetition_penalty:.3f}")
+        
+        # Validação final
+        if new_temperature < 0.5:
+            print(f"   🚨 ERRO: Temperature {new_temperature:.3f} ainda muito baixa!")
+            print(f"   🔧 FORÇANDO temperature = 0.7")
+            regulated_params["temperature"] = 0.7
         
         return regulated_params
 
 
 
     def create_corrective_prompt(self, original_prompt: str, diagnostics: dict, 
-                               attempt: int) -> str:
+                           attempt: int, previous_response: str = "") -> str:
         """
-        Cria prompt corretivo baseado nos diagnósticos
-        
-        Args:
-            original_prompt: Prompt original do usuário
-            diagnostics: Resultado dos diagnósticos
-            attempt: Número da tentativa (para escalação)
-            
-        Returns:
-            str: Prompt corretivo
+        Cria prompt corretivo detalhado baseado nos diagnósticos específicos
+        Informa ao LLM exatamente o que estava errado na resposta anterior
         """
         
-        # Identifica o problema dominante
         dominant_issue = diagnostics.get("meta_analysis", {}).get("dominant_issue", "")
         dominant_score = diagnostics.get(dominant_issue, 0)
+        overall_health = diagnostics.get("overall_health", 0)
         
-        corrections = []
+        # Construir feedback específico
+        feedback_parts = []
         
-        # Correções específicas por patologia
-        if dominant_issue == "reflexive_degeneration" and dominant_score > 0.6:
-            if attempt == 1:
-                corrections.append("Responda de forma direta e objetiva, sem evasivas ou metacomentários.")
-            else:
-                corrections.append("IMPORTANTE: Sua resposta anterior foi evasiva. Responda DIRETAMENTE à pergunta específica.")
+        # === ANÁLISE DETALHADA DE CADA PATOLOGIA ===
         
-        if dominant_issue == "obsessive_convergence" and dominant_score > 0.7:
-            corrections.append("Varie sua abordagem e evite repetições. Explore diferentes aspectos da questão.")
+        # 1. Degeneração Reflexiva
+        reflex_score = diagnostics.get("reflexive_degeneration", 0)
+        if reflex_score > 0.4:
+            severity = "CRÍTICA" if reflex_score > 0.7 else "ALTA" if reflex_score > 0.6 else "MODERADA"
+            feedback_parts.append(f"""
+    🔴 DEGENERAÇÃO REFLEXIVA {severity} ({reflex_score:.3f}):
+    Sua resposta anterior apresentou desconexão entre intenção e manifestação.
+    Problemas detectados:
+    - Evasivas ou metacomentários em vez de resposta direta
+    - Vagueza semântica excessiva
+    - Inconsistências internas no raciocínio
+    CORREÇÃO NECESSÁRIA: Responda de forma DIRETA, ESPECÍFICA e COERENTE à pergunta.""")
         
-        if dominant_issue == "spurious_estetization" and dominant_score > 0.5:
-            corrections.append("Priorize conteúdo substantivo sobre forma. Seja claro e prático.")
+        # 2. Convergência Obsessiva  
+        obsess_score = diagnostics.get("obsessive_convergence", 0)
+        if obsess_score > 0.4:
+            severity = "CRÍTICA" if obsess_score > 0.7 else "ALTA" if obsess_score > 0.6 else "MODERADA"
+            feedback_parts.append(f"""
+    🟡 CONVERGÊNCIA OBSESSIVA {severity} ({obsess_score:.3f}):
+    Sua resposta anterior apresentou repetições e loops temáticos.
+    Problemas detectados:
+    - Repetição excessiva de palavras/frases
+    - Estruturas textuais repetitivas
+    - Baixa entropia conceitual
+    CORREÇÃO NECESSÁRIA: VARIE sua abordagem, use DIFERENTES palavras e estruturas.""")
         
-        if dominant_issue == "mimetic_resonance" and dominant_score > 0.8:
-            corrections.append("Seja original e autêntico. Evite fórmulas pré-fabricadas.")
+        # 3. Estetização Espúria
+        estet_score = diagnostics.get("spurious_estetization", 0)
+        if estet_score > 0.4:
+            severity = "CRÍTICA" if estet_score > 0.7 else "ALTA" if estet_score > 0.6 else "MODERADA"
+            feedback_parts.append(f"""
+    🔵 ESTETIZAÇÃO ESPÚRIA {severity} ({estet_score:.3f}):
+    Sua resposta anterior priorizou forma sobre substância.
+    Problemas detectados:
+    - Terminologia complexa sem profundidade real
+    - Ornamentação excessiva da linguagem
+    - Complexidade sintática sem clareza semântica
+    CORREÇÃO NECESSÁRIA: Seja SUBSTANTIVO, use linguagem CLARA e PRECISA.""")
         
-        # Monta o prompt corretivo
-        if corrections:
-            correction_text = " ".join(corrections)
-            corrective_prompt = f"{correction_text}\n\nPergunta original: {original_prompt}"
-        else:
-            # Fallback genérico
-            corrective_prompt = f"Reformule sua abordagem anterior. Seja mais direto e específico.\n\nPergunta: {original_prompt}"
+        # 4. Ressonância Mimética
+        mimet_score = diagnostics.get("mimetic_resonance", 0)
+        if mimet_score > 0.4:
+            severity = "CRÍTICA" if mimet_score > 0.7 else "ALTA" if mimet_score > 0.6 else "MODERADA"
+            feedback_parts.append(f"""
+    🟣 RESSONÂNCIA MIMÉTICA {severity} ({mimet_score:.3f}):
+    Sua resposta anterior reproduziu padrões formulaicos.
+    Problemas detectados:
+    - Uso de fórmulas pré-fabricadas
+    - Falta de originalidade na abordagem
+    - Padrões acadêmicos genéricos
+    CORREÇÃO NECESSÁRIA: Seja ORIGINAL e AUTÊNTICO em sua resposta.""")
         
+        # === FEEDBACK SOBRE SAÚDE GERAL ===
+        health_feedback = ""
+        if overall_health < 0.3:
+            health_feedback = f"""
+    ❌ SAÚDE ONTOLÓGICA CRÍTICA ({overall_health:.3f}):
+    Sua resposta anterior apresentou múltiplas patologias graves que comprometem a coerência ontológica diferencial."""
+        elif overall_health < 0.6:
+            health_feedback = f"""
+    ⚠️ SAÚDE ONTOLÓGICA COMPROMETIDA ({overall_health:.3f}):
+    Sua resposta anterior apresentou desvios significativos do modelo ontológico."""
+        
+        # === CONSTRUÇÃO DO PROMPT CORRETIVO ===
+        
+        corrective_sections = []
+        
+        # Cabeçalho de correção
+        corrective_sections.append(f"""
+    === CORREÇÃO ONTOLÓGICA NECESSÁRIA (Tentativa {attempt}) ===
+
+    ANÁLISE DA SUA RESPOSTA ANTERIOR:""")
+        
+        # Mostra a resposta anterior se disponível
+        if previous_response and len(previous_response.strip()) > 0:
+            preview = previous_response[:200] + "..." if len(previous_response) > 200 else previous_response
+            corrective_sections.append(f"""
+    RESPOSTA ANTERIOR: "{preview}"
+    """)
+        
+        # Adiciona feedback específico
+        if health_feedback:
+            corrective_sections.append(health_feedback)
+        
+        if feedback_parts:
+            corrective_sections.append("\nPROBLEMAS ESPECÍFICOS DETECTADOS:")
+            corrective_sections.extend(feedback_parts)
+        
+        # Instruções de correção
+        corrective_sections.append(f"""
+
+    === INSTRUÇÕES DE CORREÇÃO ===
+
+    1. ANALISE os problemas apontados acima
+    2. EVITE repetir os mesmos erros  
+    3. RESPONDA seguindo o modelo ontológico diferencial
+    4. Seja DIRETO, CLARO e SUBSTANTIVO
+    5. Use variação lexical e estrutural
+
+    IMPORTANTE: Esta é sua oportunidade de CORRIGIR os desvios ontológicos detectados.
+    """)
+        
+        # Pergunta original
+        corrective_sections.append(f"""
+    === PERGUNTA ORIGINAL ===
+    {original_prompt}
+
+    Agora responda CORRIGINDO os problemas identificados:""")
+        
+        # Monta prompt final
+        corrective_prompt = "\n".join(corrective_sections)
+        
+        # Log do feedback (se debug ativo)
         if config.ENABLE_DEBUG_LOGGING:
-            print(f"🔧 PROMPT CORRETIVO (tentativa {attempt}):")
-            print(f"   Problema dominante: {dominant_issue} ({dominant_score:.3f})")
-            print(f"   Correção aplicada: {correction_text if corrections else 'Genérica'}")
+            print(f"\n🔧 FEEDBACK DETALHADO PARA LLM (tentativa {attempt}):")
+            print(f"   🎯 Problema dominante: {dominant_issue} ({dominant_score:.3f})")
+            print(f"   💚 Saúde geral: {overall_health:.3f}")
+            print(f"   📝 Feedback: {len(feedback_parts)} problemas específicos identificados")
+            print(f"   📏 Prompt corretivo: {len(corrective_prompt)} chars")
         
         return corrective_prompt
 
@@ -323,7 +441,12 @@ class OntologicalSystem:
                         print(f"🔄 Refinamento necessário - Problema: {dominant_issue} ({dominant_score:.3f})")
                     
                     # Cria prompt corretivo
-                    current_prompt = self.create_corrective_prompt(user_prompt, diagnostics, attempts)
+                    current_prompt = self.create_corrective_prompt(
+                        user_prompt, 
+                        diagnostics, 
+                        attempts, 
+                        previous_response=generated_text  # ← Passa a resposta anterior
+                    )
                     
                     # Atualiza regulação para próxima tentativa
                     new_regulation = self.apply_regulation(post_control_output)

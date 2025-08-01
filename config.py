@@ -136,7 +136,11 @@ MIMETIC_RESONANCE_THRESHOLD = 0.8
 ENABLE_DEBUG_LOGGING = True
 LOG_KERNEL_STATE = True
 LOG_REGULATION_ACTIONS = True
-
+# No config.py, adicione:
+ENABLE_DETAILED_FEEDBACK = True      # Liga feedback detalhado
+FEEDBACK_INCLUDE_PREVIOUS_RESPONSE = True  # Mostra resposta anterior ao LLM
+FEEDBACK_SEVERITY_THRESHOLD = 0.4    # Só mostra feedback se score > limiar
+FEEDBACK_MAX_ATTEMPTS = 3            # Máximo de tentativas com feedback
 # --- Validação da Configuração ---
 def validate_config():
     """Valida se a configuração está correta"""

@@ -1,2 +1,6 @@
 engine/.DS_Store
 .DS_Store
+/models
+/__pycache__
+/engine/__pycache__
+/kernel/__pycache__
